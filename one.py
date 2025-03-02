@@ -7,16 +7,10 @@ import random
 from datetime import datetime, timedelta
 import google.generativeai as genai
 
-TELEGRAM_API_TOKEN = '7662473826:AAHIqXyeDGtiuQDEHPuiYMUY4Ha7iiVHKQc'
+TELEGRAM_API_TOKEN = os.getenv('TELEGRAM_API_TOKEN')
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+PERPLEXITY_API_KEYS = os.getenv('PERPLEXITY_API_KEYS').split(',') if os.getenv('PERPLEXITY_API_KEYS') else []
 
-PERPLEXITY_API_KEYS = [
-    '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',
-    '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',
-    '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',
-    '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'
-]
-
-GEMINI_API_KEY = 'AIzaSyC_qiwDK41Rmo3qaW5QCG1L2HH5r-Efa2w'
 
 genai.configure(api_key=GEMINI_API_KEY)
 
